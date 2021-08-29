@@ -1,0 +1,161 @@
+#Install required software packages
+apt update
+sudo apt-get install make build-essential gcc git git-lfs jq -yqq 
+
+#Install Go
+curl https://dl.google.com/go/go1.16.7.linux-amd64.tar.gz | sudo tar -C/usr/local -zxvf -
+
+cat <<'EOF' >>$HOME/.profile
+export GO111MODULE=on
+export GOROOT=/usr/local/go
+export PATH=$PATH:$HOME/go/bin
+export PATH=$PATH:$GOROOT/bin
+EOF
+
+source $HOME/.profile
+go version
+
+#Install umeed
+git clone --depth 1 --branch v0.1.0 https://github.com/umee-network/umee.git
+cd umee && make install
+cd
+umeed init <val-oper-key-name> --chain-id umee-betanet-1
+ 
+cd ~/.umee/config
+rm -r genesis.json
+wget https://raw.githubusercontent.com/umee-network/umee/main/networks/umee-betanet-1/genesis.json
+cd
+
+
+#Install cosmovisor
+go get github.com/cosmos/cosmos-sdk/cosmovisor/cmd/cosmovisor
+
+useradd --no-create-home --shell /bin/false cosmovisor
+mkdir $HOME/cosmovisor
+
+
+mkdir -p $HOME/cosmovisor/genesis/bin
+cp $(which umeed) $HOME/cosmovisor/genesis/bin
+cp $(which cosmovisor) $HOME/cosmovisor
+chown -R cosmovisor:cosmovisor $HOME/cosmovisor
+
+sed -i 's/persistent_peers = ""/persistent_peers = "a9a84866786013f75138388fbf12cdfc425bd39c@137.184.69.184:26656,684dd9ce7746041d0453322808cc5b238861e386@137.184.65.210:26656,c4c425c66d2941ce4d5d98185aa90d2330de5efd@143.244.166.155:26656,eb42bdbd821fad7bd0048a741237625b4d954d18@143.244.165.138:26656"/g'  .umee/config/config.toml
+
+
+
+sudo tee /etc/systemd/system/cosmovisor.service > /dev/null <<EOF  
+
+[Unit]
+Description=Cosmovisor Process Manager
+After=network.target
+
+[Service]
+User=root
+Group=root
+Type=simple
+Environment="DAEMON_NAME=umeed"
+Environment="DAEMON_HOME=$HOME"
+Environment="DAEMON_RESTART_AFTER_UPGRADE=true"
+Environment="DAEMON_ALLOW_DOWNLOAD_BINARIES=true"
+Environment="UNSAFE_SKIP_BACKUP=false"
+ExecStart=$HOME/cosmovisor/cosmovisor start
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+
+#Start cosmovisor
+sudo systemctl daemon-reload
+sudo systemctl enable cosmovisor
+sudo systemctl start cosmovisor
+
+
+#Create umee account
+umeed keys add <your_key_name>
+
+#Install geth
+mkdir geth
+wget https://gethstore.blob.core.windows.net/builds/geth-linux-amd64-1.10.8-26675454.tar.gz
+tar zxvf geth-linux-amd64-1.10.8-26675454.tar.gz
+cp /root/geth-linux-amd64-1.10.8-26675454/geth /usr/local/bin/
+
+
+sudo tee /etc/systemd/system/geth.service > /dev/null <<EOF  
+
+[Unit]
+Description=Geth node
+After=online.target
+​
+[Service]
+Type=root
+User=root
+ExecStart=/usr/local/bin/geth --syncmode "light" --http --http.addr=0.0.0.0 --http.port=8545 --goerli
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=4096
+​
+[Install]
+WantedBy=multi-user.target
+EOF
+
+#Start geth
+sudo systemctl daemon-reload
+sudo systemctl enable geth
+sudo systemctl start geth
+
+
+#Install gorc
+wget https://github.com/PeggyJV/gravity-bridge/releases/download/v0.1.24/gorc
+chmod +x ./gorc
+mv ./gorc /usr/local/bin
+
+mkdir $HOME/gorc && cd $HOME/gorc
+nano config.toml
+
+keystore = "/root/.gorc/keystore/"
+
+[gravity]
+contract = "0xc846512f680a2161D2293dB04cbd6C294c5cFfA7"
+fees_denom = "uumee"
+
+[ethereum]
+key_derivation_path = "m/44'/60'/0'/0/0"
+rpc = "http://localhost:8545"
+
+[cosmos]
+key_derivation_path = "m/44'/118'/0'/0/0"
+grpc = "http://localhost:9090"
+gas_price = { amount = 0.00001, denom = "uumee" }
+prefix = "umee"
+
+
+gorc --config $HOME/gorc/config.toml keys cosmos recover <orch-umee-key-name> "<mnemonic>"
+gorc --config $HOME/gorc/config.toml keys eth recover <orch-eth-key-name> "<mnemonic>"
+
+sudo tee /etc/systemd/system/gorc.service > /dev/null <<EOF  
+
+[Unit]
+Description=Gravity Bridge Orchestrator
+After=online.target
+
+[Service]
+Type=root
+User=root
+Environment="RUST_LOG=INFO"
+ExecStart=/usr/local/bin/gorc --config $HOME/gorc/config.toml orchestrator start --cosmos-key <orch-umee-key-name> --ethereum-key <orch-eth-key-name>
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+#Start gorc
+sudo systemctl daemon-reload
+sudo systemctl enable gorc
+sudo systemctl start gorc
